@@ -10,7 +10,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/bxcodec/faker"
+	"github.com/budhip/gofaker"
 )
 
 type SomeStruct struct {
