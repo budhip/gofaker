@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/budhip/gofaker/support/slice"
+	"github.com/budhip/gofaker/v2/support/slice"
 )
 
 func TestSetDowser(t *testing.T) {
@@ -146,5 +146,22 @@ func TestFakeNameFemale(t *testing.T) {
 	randNameFlag = 20
 	if name == "" {
 		t.Error("Expected from function name string get empty string")
+	}
+}
+
+func TestFakeGender(t *testing.T) {
+	gender, err := GetPerson().Gender(reflect.Value{})
+	if err != nil {
+		t.Error("Expected  not error, got err", err)
+	}
+	if !slice.Contains(genders, gender.(string)) {
+		t.Error("Expected value from variable genders in function Gender")
+	}
+}
+
+func TestFakeGenderPublicFunction(t *testing.T) {
+	gender := Gender()
+	if !slice.Contains(genders, gender) {
+		t.Error("Expected value from variable genders in function Gender")
 	}
 }

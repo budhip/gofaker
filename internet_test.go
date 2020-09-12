@@ -2,10 +2,11 @@ package faker
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/budhip/gofaker/support/slice"
+	"github.com/budhip/gofaker/v2/support/slice"
 )
 
 func TestEmail(t *testing.T) {
@@ -155,5 +156,13 @@ func TestFakePassword(t *testing.T) {
 	pass := Password()
 	if pass == "" {
 		t.Error("Expected hash password")
+	}
+}
+
+func TestFakeJWT(t *testing.T) {
+	jwt := Jwt()
+	reg := regexp.MustCompile(`[a-zA-Z]+.[a-zA-Z]+.[a-zA-Z]+`)
+	if !reg.MatchString(jwt) {
+		t.Error("Invalid format on JWT token")
 	}
 }

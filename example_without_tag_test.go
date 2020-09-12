@@ -1,18 +1,12 @@
-## Without Tag
-
-
-You also can use faker to generate your structs data randomly without any tag. And it will fill the data based on its data-type.
-
-```go
-
-package main
+package faker_test
 
 import (
 	"fmt"
 
-	"github.com/budhip/gofaker"
+	"github.com/budhip/gofaker/v2"
 )
 
+// SomeStruct ...
 type SomeStruct struct {
 	Int      int
 	Int8     int8
@@ -32,18 +26,22 @@ type SomeStruct struct {
 	SBool    []bool
 	Struct   AStruct
 }
+
+// AStruct ...
 type AStruct struct {
 	Number        int64
 	Height        int64
 	AnotherStruct BStruct
 }
 
+// BStruct ...
 type BStruct struct {
 	Image string
 }
 
-func main() {
-
+// You also can use faker to generate your structs data randomly without any tag.
+// And it will fill the data based on its data-type.
+func Example_withoutTag() {
 	a := SomeStruct{}
 	err := faker.FakeData(&a)
 	if err != nil {
@@ -51,7 +49,7 @@ func main() {
 	}
 	fmt.Printf("%+v", a)
 	/*
-		Output:
+		Result:
 		{
 		    Int:5231564546548329
 		    Int8:52
@@ -79,5 +77,3 @@ func main() {
 		}
 	*/
 }
-
-```

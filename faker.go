@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/budhip/gofaker/v2/support/slice"
 )
 
 var (
@@ -25,6 +28,14 @@ var (
 	nBoundary = numberBoundary{start: 0, end: 100}
 	//Sets the random size for slices and maps.
 	randomSize = 100
+	// Sets the single fake data generator to generate unique values
+	generateUniqueValues = false
+	// Unique values are kept in memory so the generator retries if the value already exists
+	uniqueValues = map[string][]interface{}{}
+	// Lang is selected language for random string generator
+	lang = LangENG
+	// How much tries for generating random string
+	maxGenerateStringRetries = 1000000
 )
 
 type numberBoundary struct {
@@ -32,14 +43,31 @@ type numberBoundary struct {
 	end   int
 }
 
+type langRuneBoundary struct {
+	start   rune
+	end     rune
+	exclude []rune
+}
+
+// Language rune boundaries here
+var (
+	// LangENG is for english language
+	LangENG = langRuneBoundary{65, 122, []rune{91, 92, 93, 94, 95, 96}}
+	// LangCHI is for chinese language
+	LangCHI = langRuneBoundary{19968, 40869, nil}
+	// LangRUS is for russian language
+	LangRUS = langRuneBoundary{1025, 1105, nil}
+)
+
 // Supported tags
 const (
 	letterIdxBits         = 6                    // 6 bits to represent a letter index
 	letterIdxMask         = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
 	letterIdxMax          = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-	letterBytes           = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	maxRetry              = 10000                // max number of retry for unique values
 	tagName               = "faker"
 	keep                  = "keep"
+	unique                = "unique"
 	ID                    = "uuid_digit"
 	HyphenatedID          = "uuid_hyphenated"
 	EmailTag              = "email"
@@ -50,6 +78,7 @@ const (
 	IPV4Tag               = "ipv4"
 	IPV6Tag               = "ipv6"
 	PASSWORD              = "password"
+	JWT                   = "jwt"
 	LATITUDE              = "lat"
 	LONGITUDE             = "long"
 	CreditCardNumber      = "cc_number"
@@ -64,6 +93,7 @@ const (
 	FirstNameFemaleTag    = "first_name_female"
 	LastNameTag           = "last_name"
 	NAME                  = "name"
+	GENDER                = "gender"
 	UnixTimeTag           = "unix_time"
 	DATE                  = "date"
 	TIME                  = "time"
@@ -83,10 +113,16 @@ const (
 	AmountWithCurrencyTag = "amount_with_currency"
 	SKIP                  = "-"
 	Length                = "len"
+	SliceLength           = "slice_len"
+	Language              = "lang"
 	BoundaryStart         = "boundary_start"
 	BoundaryEnd           = "boundary_end"
 	Equals                = "="
 	comma                 = ","
+	colon                 = ":"
+	ONEOF                 = "oneof"
+	//period                = "."
+	//hyphen = "-"
 )
 
 var defaultTag = map[string]string{
@@ -98,6 +134,7 @@ var defaultTag = map[string]string{
 	IPV4Tag:               IPV4Tag,
 	IPV6Tag:               IPV6Tag,
 	PASSWORD:              PASSWORD,
+	JWT:                   JWT,
 	CreditCardType:        CreditCardType,
 	CreditCardNumber:      CreditCardNumber,
 	LATITUDE:              LATITUDE,
@@ -112,6 +149,7 @@ var defaultTag = map[string]string{
 	FirstNameFemaleTag:    FirstNameFemaleTag,
 	LastNameTag:           LastNameTag,
 	NAME:                  NAME,
+	GENDER:                GENDER,
 	UnixTimeTag:           UnixTimeTag,
 	DATE:                  DATE,
 	TIME:                  TimeFormat,
@@ -146,6 +184,7 @@ var mapperTag = map[string]TaggedFunction{
 	IPV4Tag:               GetNetworker().IPv4,
 	IPV6Tag:               GetNetworker().IPv6,
 	PASSWORD:              GetNetworker().Password,
+	JWT:                   GetNetworker().Jwt,
 	CreditCardType:        GetPayment().CreditCardType,
 	CreditCardNumber:      GetPayment().CreditCardNumber,
 	LATITUDE:              GetAddress().Latitude,
@@ -160,6 +199,7 @@ var mapperTag = map[string]TaggedFunction{
 	FirstNameFemaleTag:    GetPerson().FirstNameFemale,
 	LastNameTag:           GetPerson().LastName,
 	NAME:                  GetPerson().Name,
+	GENDER:                GetPerson().Gender,
 	UnixTimeTag:           GetDateTimer().UnixTime,
 	DATE:                  GetDateTimer().Date,
 	TIME:                  GetDateTimer().Time,
@@ -187,26 +227,55 @@ var mapperTag = map[string]TaggedFunction{
 // 		ErrValueNotPtr: Error when value is not pointer
 // 		ErrTagNotSupported: Error when tag is not supported
 // 		ErrTagAlreadyExists: Error when tag exists and call AddProvider
+// 		ErrTagDoesNotExist: Error when tag does not exist and call RemoveProvider
 // 		ErrMoreArguments: Error on passing more arguments
 // 		ErrNotSupportedPointer: Error when passing unsupported pointer
 var (
 	ErrUnsupportedKindPtr  = "Unsupported kind: %s Change Without using * (pointer) in Field of %s"
 	ErrUnsupportedKind     = "Unsupported kind: %s"
 	ErrValueNotPtr         = "Not a pointer value"
-	ErrTagNotSupported     = "Tag unsupported"
+	ErrTagNotSupported     = "Tag unsupported: %s"
 	ErrTagAlreadyExists    = "Tag exists"
+	ErrTagDoesNotExist     = "Tag does not exist"
 	ErrMoreArguments       = "Passed more arguments than is possible : (%d)"
 	ErrNotSupportedPointer = "Use sample:=new(%s)\n faker.FakeData(sample) instead"
 	ErrSmallerThanZero     = "Size:%d is smaller than zero."
+	ErrSmallerThanOne      = "Size:%d is smaller than one."
+	ErrUniqueFailure       = "Failed to generate a unique value for field \"%s\""
 
 	ErrStartValueBiggerThanEnd = "Start value can not be bigger than end value."
 	ErrWrongFormattedTag       = "Tag \"%s\" is not written properly"
 	ErrUnknownType             = "Unknown Type"
 	ErrNotSupportedTypeForTag  = "Type is not supported by tag."
+	ErrUnsupportedTagArguments = "Tag arguments are not compatible with field type."
+	ErrDuplicateSeparator      = "Duplicate separator for tag arguments."
+	ErrNotEnoughTagArguments   = "Not enough arguments for tag."
+	ErrUnsupportedNumberType   = "Unsupported Number type."
+)
+
+// Compiled regexp
+var (
+	findLangReg     *regexp.Regexp
+	findLenReg      *regexp.Regexp
+	findSliceLenReg *regexp.Regexp
 )
 
 func init() {
 	rand.Seed(time.Now().UnixNano())
+	findLangReg, _ = regexp.Compile("lang=[a-z]{3}")
+	findLenReg, _ = regexp.Compile(`len=\d+`)
+	findSliceLenReg, _ = regexp.Compile(`slice_len=\d+`)
+}
+
+// ResetUnique is used to forget generated unique values.
+// Call this when you're done generating a dataset.
+func ResetUnique() {
+	uniqueValues = map[string][]interface{}{}
+}
+
+// SetGenerateUniqueValues allows to set the single fake data generator functions to generate unique data.
+func SetGenerateUniqueValues(unique bool) {
+	generateUniqueValues = unique
 }
 
 // SetNilIfLenIsZero allows to set nil for the slice and maps, if size is 0.
@@ -223,10 +292,15 @@ func SetRandomStringLength(size int) error {
 	return nil
 }
 
+// SetStringLang sets language of random string generation (LangENG, LangCHI, LangRUS)
+func SetStringLang(l langRuneBoundary) {
+	lang = l
+}
+
 // SetRandomMapAndSliceSize sets the size for maps and slices for random generation.
 func SetRandomMapAndSliceSize(size int) error {
-	if size < 0 {
-		return fmt.Errorf(ErrSmallerThanZero, size)
+	if size < 1 {
+		return fmt.Errorf(ErrSmallerThanOne, size)
 	}
 	randomSize = size
 	return nil
@@ -266,7 +340,7 @@ func FakeData(a interface{}) error {
 	return nil
 }
 
-// AddProvider extend faker with tag to generate fake data with specified custom algoritm
+// AddProvider extend faker with tag to generate fake data with specified custom algorithm
 // Example:
 // 		type Gondoruwo struct {
 // 			Name       string
@@ -319,6 +393,17 @@ func AddProvider(tag string, provider TaggedFunction) error {
 	return nil
 }
 
+// RemoveProvider removes existing customization added with AddProvider
+func RemoveProvider(tag string) error {
+	if _, ok := mapperTag[tag]; !ok {
+		return errors.New(ErrTagDoesNotExist)
+	}
+
+	delete(mapperTag, tag)
+
+	return nil
+}
+
 func getValue(a interface{}) (reflect.Value, error) {
 	t := reflect.TypeOf(a)
 	if t == nil {
@@ -352,6 +437,7 @@ func getValue(a interface{}) (reflect.Value, error) {
 		default:
 			originalDataVal := reflect.ValueOf(a)
 			v := reflect.New(t).Elem()
+			retry := 0 // error if cannot generate unique value after maxRetry tries
 			for i := 0; i < v.NumField(); i++ {
 				if !v.Field(i).CanSet() {
 					continue // to avoid panic to set on unexported field in struct
@@ -390,14 +476,32 @@ func getValue(a interface{}) (reflect.Value, error) {
 					}
 				}
 
+				if tags.unique {
+
+					if retry >= maxRetry {
+						return reflect.Value{}, fmt.Errorf(ErrUniqueFailure, reflect.TypeOf(a).Field(i).Name)
+					}
+
+					value := v.Field(i).Interface()
+					if slice.ContainsValue(uniqueValues[tags.fieldType], value) { // Retry if unique value already found
+						i--
+						retry++
+						continue
+					}
+					retry = 0
+					uniqueValues[tags.fieldType] = append(uniqueValues[tags.fieldType], value)
+				} else {
+					retry = 0
+				}
+
 			}
 			return v, nil
 		}
 
 	case reflect.String:
-		res := randomString(randomStringLen)
-		return reflect.ValueOf(res), nil
-	case reflect.Array, reflect.Slice:
+		res, err := randomString(randomStringLen, &lang)
+		return reflect.ValueOf(res), err
+	case reflect.Slice:
 		len := randomSliceAndMapSize()
 		if shouldSetNil && len == 0 {
 			return reflect.Zero(t), nil
@@ -408,6 +512,18 @@ func getValue(a interface{}) (reflect.Value, error) {
 			if err != nil {
 				return reflect.Value{}, err
 			}
+			val = val.Convert(v.Index(i).Type())
+			v.Index(i).Set(val)
+		}
+		return v, nil
+	case reflect.Array:
+		v := reflect.New(t).Elem()
+		for i := 0; i < v.Len(); i++ {
+			val, err := getValue(v.Index(i).Interface())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			val = val.Convert(v.Index(i).Type())
 			v.Index(i).Set(val)
 		}
 		return v, nil
@@ -473,7 +589,11 @@ func getValue(a interface{}) (reflect.Value, error) {
 }
 
 func isZero(field reflect.Value) (bool, error) {
-	for _, kind := range []reflect.Kind{reflect.Struct, reflect.Slice, reflect.Array, reflect.Map} {
+	if field.Kind() == reflect.Map {
+		return field.Len() == 0, nil
+	}
+
+	for _, kind := range []reflect.Kind{reflect.Struct, reflect.Slice, reflect.Array} {
 		if kind == field.Kind() {
 			return false, fmt.Errorf("keep not allowed on struct")
 		}
@@ -485,10 +605,14 @@ func decodeTags(typ reflect.Type, i int) structTag {
 	tags := strings.Split(typ.Field(i).Tag.Get(tagName), ",")
 
 	keepOriginal := false
+	uni := false
 	res := make([]string, 0)
 	for _, tag := range tags {
 		if tag == keep {
 			keepOriginal = true
+			continue
+		} else if tag == unique {
+			uni = true
 			continue
 		}
 		res = append(res, tag)
@@ -496,12 +620,14 @@ func decodeTags(typ reflect.Type, i int) structTag {
 
 	return structTag{
 		fieldType:    strings.Join(res, ","),
+		unique:       uni,
 		keepOriginal: keepOriginal,
 	}
 }
 
 type structTag struct {
 	fieldType    string
+	unique       bool
 	keepOriginal bool
 }
 
@@ -514,7 +640,7 @@ func setDataWithTag(v reflect.Value, tag string) error {
 	switch v.Kind() {
 	case reflect.Ptr:
 		if _, exist := mapperTag[tag]; !exist {
-			return errors.New(ErrTagNotSupported)
+			return fmt.Errorf(ErrTagNotSupported, tag)
 		}
 		if _, def := defaultTag[tag]; !def {
 			res, err := mapperTag[tag](v)
@@ -546,7 +672,7 @@ func setDataWithTag(v reflect.Value, tag string) error {
 		return userDefinedMap(v, tag)
 	default:
 		if _, exist := mapperTag[tag]; !exist {
-			return errors.New(ErrTagNotSupported)
+			return fmt.Errorf(ErrTagNotSupported, tag)
 		}
 		res, err := mapperTag[tag](v)
 		if err != nil {
@@ -558,6 +684,16 @@ func setDataWithTag(v reflect.Value, tag string) error {
 }
 
 func userDefinedMap(v reflect.Value, tag string) error {
+	if tagFunc, ok := mapperTag[tag]; ok {
+		res, err := tagFunc(v)
+		if err != nil {
+			return err
+		}
+
+		v.Set(reflect.ValueOf(res))
+		return nil
+	}
+
 	len := randomSliceAndMapSize()
 	if shouldSetNil && len == 0 {
 		v.Set(reflect.Zero(v.Type()))
@@ -600,13 +736,25 @@ func getValueWithTag(t reflect.Type, tag string) (interface{}, error) {
 }
 
 func userDefinedArray(v reflect.Value, tag string) error {
-	len := randomSliceAndMapSize()
-	if shouldSetNil && len == 0 {
+	_, tagExists := mapperTag[tag]
+	if tagExists {
+		res, err := mapperTag[tag](v)
+		if err != nil {
+			return err
+		}
+		v.Set(reflect.ValueOf(res))
+		return nil
+	}
+	sliceLen, err := extractSliceLengthFromTag(tag)
+	if err != nil {
+		return err
+	}
+	if shouldSetNil && sliceLen == 0 {
 		v.Set(reflect.Zero(v.Type()))
 		return nil
 	}
-	array := reflect.MakeSlice(v.Type(), len, len)
-	for i := 0; i < len; i++ {
+	array := reflect.MakeSlice(v.Type(), sliceLen, sliceLen)
+	for i := 0; i < sliceLen; i++ {
 		res, err := getValueWithTag(v.Type().Elem(), tag)
 		if err != nil {
 			return err
@@ -633,7 +781,7 @@ func userDefinedString(v reflect.Value, tag string) error {
 		}
 	}
 	if res == nil {
-		return errors.New(ErrTagNotSupported)
+		return fmt.Errorf(ErrTagNotSupported, tag)
 	}
 	val, _ := res.(string)
 	v.SetString(val)
@@ -656,29 +804,220 @@ func userDefinedNumber(v reflect.Value, tag string) error {
 		}
 	}
 	if res == nil {
-		return errors.New(ErrTagNotSupported)
+		return fmt.Errorf(ErrTagNotSupported, tag)
 	}
 
 	v.Set(reflect.ValueOf(res))
 	return nil
 }
 
+//extractSliceLengthFromTag checks if the sliceLength tag 'slice_len' is set, if so, returns its value, else return a random length
+func extractSliceLengthFromTag(tag string) (int, error) {
+	if strings.Contains(tag, SliceLength) {
+		lenParts := strings.SplitN(findSliceLenReg.FindString(tag), Equals, -1)
+		if len(lenParts) != 2 {
+			return 0, fmt.Errorf(ErrWrongFormattedTag, tag)
+		}
+		sliceLen, err := strconv.Atoi(lenParts[1])
+		if err != nil {
+			return 0, fmt.Errorf("the given sliceLength has to be numeric, tag: %s", tag)
+		}
+		if sliceLen < 0 {
+			return 0, fmt.Errorf("slice length can not be negative, tag: %s", tag)
+		}
+		return sliceLen, nil
+	}
+
+	return randomSliceAndMapSize(), nil //Returns random slice length if the sliceLength tag isn't set
+}
+
 func extractStringFromTag(tag string) (interface{}, error) {
-	if !strings.Contains(tag, Length) {
-		return nil, errors.New(ErrTagNotSupported)
+	var err error
+	strlen := randomStringLen
+	strlng := &lang
+	isOneOfTag := strings.Contains(tag, ONEOF)
+	if !strings.Contains(tag, Length) && !strings.Contains(tag, Language) && !isOneOfTag {
+		return nil, fmt.Errorf(ErrTagNotSupported, tag)
 	}
-	len, err := extractNumberFromText(tag)
-	if err != nil {
-		return nil, err
+	if strings.Contains(tag, Length) {
+		lenParts := strings.SplitN(findLenReg.FindString(tag), Equals, -1)
+		if len(lenParts) != 2 {
+			return nil, fmt.Errorf(ErrWrongFormattedTag, tag)
+		}
+		strlen, _ = strconv.Atoi(lenParts[1])
 	}
-	res := randomString(len)
-	return res, nil
+	if strings.Contains(tag, Language) {
+		strlng, err = extractLangFromTag(tag)
+		if err != nil {
+			return nil, fmt.Errorf(ErrWrongFormattedTag, tag)
+		}
+	}
+	if isOneOfTag {
+		items := strings.Split(tag, colon)
+		argsList := items[1:]
+		if len(argsList) != 1 {
+			return nil, fmt.Errorf(ErrUnsupportedTagArguments)
+		}
+		if strings.Contains(argsList[0], ",,") {
+			return nil, fmt.Errorf(ErrDuplicateSeparator)
+		}
+		args := strings.Split(argsList[0], comma)
+		if len(args) < 2 {
+			return nil, fmt.Errorf(ErrNotEnoughTagArguments)
+		}
+		toRet := args[rand.Intn(len(args))]
+		return strings.TrimSpace(toRet), nil
+	}
+	res, err := randomString(strlen, strlng)
+	return res, err
+}
+
+func extractLangFromTag(tag string) (*langRuneBoundary, error) {
+	text := findLangReg.FindString(tag)
+	texts := strings.SplitN(text, Equals, -1)
+	if len(texts) != 2 {
+		return nil, fmt.Errorf(ErrWrongFormattedTag, text)
+	}
+	switch strings.ToLower(texts[1]) {
+	case "eng":
+		return &LangENG, nil
+	case "rus":
+		return &LangRUS, nil
+	case "chi":
+		return &LangCHI, nil
+	default:
+		return &LangENG, nil
+	}
 }
 
 func extractNumberFromTag(tag string, t reflect.Type) (interface{}, error) {
-	if !strings.Contains(tag, BoundaryStart) || !strings.Contains(tag, BoundaryEnd) {
-		return nil, errors.New(ErrTagNotSupported)
+	hasOneOf := strings.Contains(tag, ONEOF)
+	hasBoundaryStart := strings.Contains(tag, BoundaryStart)
+	hasBoundaryEnd := strings.Contains(tag, BoundaryEnd)
+	usingOneOfTag := hasOneOf && (!hasBoundaryStart && !hasBoundaryEnd)
+	usingBoundariesTags := !hasOneOf && (hasBoundaryStart && hasBoundaryEnd)
+	if !usingOneOfTag && !usingBoundariesTags {
+		return nil, fmt.Errorf(ErrTagNotSupported, tag)
 	}
+
+	// handling oneof tag
+	if usingOneOfTag {
+		argsList := strings.Split(tag, colon)[1:]
+		if len(argsList) != 1 {
+			return nil, fmt.Errorf(ErrUnsupportedTagArguments)
+		}
+		if strings.Contains(argsList[0], ",,") {
+			return nil, fmt.Errorf(ErrDuplicateSeparator)
+		}
+		args := strings.Split(argsList[0], comma)
+		if len(args) < 2 {
+			return nil, fmt.Errorf(ErrNotEnoughTagArguments)
+		}
+		switch t.Kind() {
+		case reflect.Float64:
+			{
+				toRet, err := extractFloat64FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(float64), nil
+			}
+		case reflect.Float32:
+			{
+				toRet, err := extractFloat32FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(float32), nil
+			}
+		case reflect.Int64:
+			{
+				toRet, err := extractInt64FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(int64), nil
+			}
+		case reflect.Int32:
+			{
+				toRet, err := extractInt32FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(int32), nil
+			}
+		case reflect.Int16:
+			{
+				toRet, err := extractInt16FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(int16), nil
+			}
+		case reflect.Int8:
+			{
+				toRet, err := extractInt8FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(int8), nil
+			}
+		case reflect.Int:
+			{
+				toRet, err := extractIntFromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(int), nil
+			}
+		case reflect.Uint64:
+			{
+				toRet, err := extractUint64FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(uint64), nil
+			}
+		case reflect.Uint32:
+			{
+				toRet, err := extractUint32FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(uint32), nil
+			}
+		case reflect.Uint16:
+			{
+				toRet, err := extractUint16FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(uint16), nil
+			}
+		case reflect.Uint8:
+			{
+				toRet, err := extractUint8FromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(uint8), nil
+			}
+		case reflect.Uint:
+			{
+				toRet, err := extractUintFromTagArgs(args)
+				if err != nil {
+					return nil, err
+				}
+				return toRet.(uint), nil
+			}
+		default:
+			{
+				return nil, fmt.Errorf(ErrUnsupportedNumberType)
+			}
+		}
+	}
+
+	// handling boundary tags
 	valuesStr := strings.SplitN(tag, comma, -1)
 	if len(valuesStr) != 2 {
 		return nil, fmt.Errorf(ErrWrongFormattedTag, tag)
@@ -727,21 +1066,34 @@ func extractNumberFromText(text string) (int, error) {
 	return strconv.Atoi(texts[1])
 }
 
-func randomString(n int) string {
-	b := make([]byte, n)
-	for i, cache, remain := n-1, rand.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = rand.Int63(), letterIdxMax
+func randomString(n int, lang *langRuneBoundary) (string, error) {
+	b := make([]rune, 0)
+	set := make(map[rune]struct{})
+	if lang.exclude != nil {
+		for _, s := range lang.exclude {
+			set[s] = struct{}{}
 		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
-		}
-		cache >>= letterIdxBits
-		remain--
 	}
 
-	return string(b)
+	counter := 0
+	for i := 0; i < n; {
+		randRune := rune(rand.Intn(int(lang.end-lang.start)) + int(lang.start))
+		for slice.ContainsRune(set, randRune) {
+			if counter++; counter >= maxGenerateStringRetries {
+				return "", errors.New("Max number of string generation retries exhausted")
+			}
+			randRune = rune(rand.Intn(int(lang.end-lang.start)) + int(lang.start))
+			_, ok := set[randRune]
+			if !ok {
+				break
+			}
+		}
+		b = append(b, randRune)
+		i++
+	}
+
+	k := string(b)
+	return k, nil
 }
 
 // randomIntegerWithBoundary returns a random integer between input start and end boundary. [start, end)
@@ -806,4 +1158,26 @@ func RandomInt(parameters ...int) (p []int, err error) {
 		err = fmt.Errorf(ErrMoreArguments, len(parameters))
 	}
 	return p, err
+}
+
+func generateUnique(dataType string, fn func() interface{}) (interface{}, error) {
+	for i := 0; i < maxRetry; i++ {
+		value := fn()
+		if !slice.ContainsValue(uniqueValues[dataType], value) { // Retry if unique value already found
+			uniqueValues[dataType] = append(uniqueValues[dataType], value)
+			return value, nil
+		}
+	}
+	return reflect.Value{}, fmt.Errorf(ErrUniqueFailure, dataType)
+}
+
+func singleFakeData(dataType string, fn func() interface{}) interface{} {
+	if generateUniqueValues {
+		v, err := generateUnique(dataType, fn)
+		if err != nil {
+			panic(err)
+		}
+		return v
+	}
+	return fn()
 }

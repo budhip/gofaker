@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/budhip/gofaker/support/slice"
+	"github.com/budhip/gofaker/v2/support/slice"
 )
 
 func TestSetDateTimer(t *testing.T) {

@@ -1,4 +1,4 @@
-BINARY=gofaker
+BINARY=faker
 
 build: test
 	@go build ./...
@@ -13,17 +13,10 @@ unittest:
 lint-prepare:
 	@echo "Installing golangci-lint"
 	# @go get -u github.com/golangci/golangci-lint/cmd/golangci-lint
-	curl -sfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s v1.13.2
+	curl -sfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh| sh -s latest
 
 lint:
-	./bin/golangci-lint run \
-		--exclude="cyclomatic complexity" \
-		--exclude-use-default=false \
-		--enable=golint \
-		--enable=gocyclo \
-		--enable=goconst \
-		--enable=unconvert \
-		./...
+	./bin/golangci-lint run ./...
 clean:
 	if [ -f ${BINARY} ] ; then rm ${BINARY} ; fi
 
